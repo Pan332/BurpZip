@@ -537,6 +537,7 @@ def serve_root(store, deadline_seconds: int = DEFAULT_DEADLINE, *, api=None,
         try:
             with NativeProvider(store, api, deadline_seconds) as provider:
                 logged = 0
+                stop_seen = None
                 try:
                     while not stop.wait(0.5):
                         if provider.error_count > logged:
@@ -545,8 +546,15 @@ def serve_root(store, deadline_seconds: int = DEFAULT_DEADLINE, *, api=None,
                                 serve_log(store.path, f"error: {message}")
                             logged = provider.error_count
                         if os.path.lexists(stop_file):
-                            serve_log(store.path, "stop requested")
-                            break
+                            # Never drop an open "Re-zip it now?" question (bounded wait).
+                            if watcher is not None and watcher.asking() \
+                                    and (stop_seen is None or time.monotonic() - stop_seen < 3600):
+                                if stop_seen is None:
+                                    stop_seen = time.monotonic()
+                                    serve_log(store.path, "stop requested; waiting for the open re-zip question")
+                            else:
+                                serve_log(store.path, "stop requested")
+                                break
                         if watcher is not None and time.monotonic() >= next_close:
                             next_close = time.monotonic() + CLOSE_CHECK_SECONDS
                             watcher.poll()
@@ -731,6 +739,10 @@ class CloseWatcher:
             except Exception:
                 answer = False
             self._answers.put((name, answer))
+
+    def asking(self) -> bool:
+        """A re-zip question is queued or open (or its answer not yet handled)."""
+        return bool(self._asking)
 
     def answers(self) -> list[tuple[str, bool]]:
         out = []

@@ -9,6 +9,8 @@ import sys
 import tempfile
 import time
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock

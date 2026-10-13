@@ -14,6 +14,8 @@ import tempfile
 import threading
 import time
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 from unittest import mock
 
 import archiver as ar
@@ -632,6 +634,41 @@ class ProviderTests(unittest.TestCase):
         self.assertFalse(w.in_use(self.placeholder))
         self.api.in_use_paths.add(_norm(self.placeholder))
         self.assertTrue(w.in_use(self.placeholder))
+
+    def test_stop_waits_for_an_open_question(self):
+        asking = {"value": True}
+
+        class Watcher:
+            def __init__(self, store, **kwargs):
+                pass
+
+            def poll(self):
+                pass
+
+            def asking(self):
+                return asking["value"]
+
+            def answers(self):
+                return []
+        done = threading.Event()
+
+        def serve():
+            np.serve_root(self.store, api=self.api, idle_days=0, ask_on_close=True)
+            done.set()
+        with mock.patch.object(np, "CloseWatcher", Watcher):
+            thread = threading.Thread(target=serve)
+            thread.start()
+            deadline = time.monotonic() + 10
+            while self.api.callback is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            np.request_stop(self.store_dir)
+            self.assertFalse(done.wait(2), "stopped while a re-zip question was open")
+            asking["value"] = False
+            self.assertTrue(done.wait(10), "did not stop after the question was answered")
+            thread.join(10)
+        self.assertFalse(os.path.exists(os.path.join(self.store_dir, np.STOP_REQUEST)))
+        with open(os.path.join(self.store_dir, np.SERVE_LOG), encoding="utf-8") as log:
+            self.assertIn("waiting for the open re-zip question", log.read())
 
     def test_zipped_projects_are_never_asked_about(self):
         w, busy, asked = self.watcher(True)

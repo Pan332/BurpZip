@@ -5,6 +5,8 @@ import sys
 import tempfile
 import time
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace

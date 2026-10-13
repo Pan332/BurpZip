@@ -11,6 +11,8 @@ import threading
 import time
 import types
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 import winreg
 from pathlib import Path
 from unittest import mock

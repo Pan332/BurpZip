@@ -1,3 +1,7 @@
+# Personal settings (created on first run)
+burpzip.ini
+burpzip.ini.tmp
+
 # Python
 __pycache__/
 *.py[cod]

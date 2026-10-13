@@ -10,7 +10,7 @@ A Windows/Python desktop tool and CLI for listing, archiving, restoring and open
 - No third-party Python packages are required.
 - For the optional **Burp folder**: Windows 10 version 1709 or newer (or Windows 11), 64-bit Python, and a local NTFS drive for the Burp folder and its store. No administrator rights are needed.
 
-Keep all `*.py` files together (`burpzip.py`, `archiver.py`, `launcher.py`, `gui.py`, and `native_cfapi.py`, `native_store.py`, `native_provider.py` for the Burp folder). Installing the prerequisites is your own explicit action; the tool does not install software or register file associations automatically.
+Keep all `*.py` files together (`burpzip.py`, `archiver.py`, `launcher.py`, `gui.py`, `config.py`, and `native_cfapi.py`, `native_store.py`, `native_provider.py` for the Burp folder). Settings are created in `burpzip.ini` on first run (see *Settings*). Installing the prerequisites is your own explicit action; the tool does not install software or register file associations automatically.
 
 ## Quick start
 
@@ -121,8 +121,8 @@ How it works: the Burp folder is registered with Windows Cloud Files. Each proje
 
 Menu **Burp folder**:
 
-- **Set up Burp folder...** creates `Downloads\BurpProjects` (or a new empty folder you choose) plus its store `...-store`, registers it, starts the provider and optionally starts it at every logon.
-- **Start provider / Stop provider**, **Start provider automatically at logon**, **Open Burp folder**, **Show provider log**.
+- **Set up Burp folder...** creates `Downloads\BurpProjects` (or a new empty folder you choose) plus its store `...-store`, registers it, asks when the provider should run (see *Provider modes*) and starts it. The first time Burpzip opens without any settings it offers to do this.
+- **Start provider / Stop provider**, **Provider mode**, **Open Burp folder**, **Show provider log**.
 
 Toolbar:
 
@@ -138,8 +138,9 @@ The top bar shows **● Provider running** / **Provider stopped**. Burp-folder r
 ```text
 python burpzip.py native init --root <NEW_EMPTY_FOLDER> --store <NEW_SEPARATE_FOLDER> --experimental
 python burpzip.py native add --store <STORE> [--move] <EXISTING.burpz>
-python burpzip.py native autostart --store <STORE> --enable | --disable
-python burpzip.py native serve --store <STORE> [--idle-days 10] [--no-ask-on-close]   (foreground; autostart runs this hidden)
+python burpzip.py native provider-mode logon | with-burp | manual
+python burpzip.py burp [--project <Project.burp>]        (what the "Burp Suite (Burpzip)" shortcut runs)
+python burpzip.py native serve --store <STORE> [--idle-days N] [--ask-on-close | --no-ask-on-close]
 python burpzip.py native rezip --store <STORE> --name <Project.burp> | --idle-days <N>
 python burpzip.py native stop --store <STORE>
 python burpzip.py native status --store <STORE>
@@ -148,7 +149,39 @@ python burpzip.py native export --store <STORE> --name <Project.burp> --dest <NE
 python burpzip.py native detach --store <STORE>
 ```
 
-`add`, `materialize`, `export` and `detach` pause a running provider and restart it afterwards. The provider logs to `serve.log` in the store.
+`add`, `materialize`, `export` and `detach` pause a running provider and restart it afterwards. The provider logs to `serve.log` in the store. `serve` takes `--idle-days` and ask-on-close from `burpzip.ini` unless given on the command line.
+
+### Provider modes
+
+The provider must be running for Burp to open a still-zipped project. Choose when it runs (GUI: **Burp folder > Provider mode**, or `native provider-mode`):
+
+| Mode | The provider runs | Notes |
+|---|---|---|
+| `logon` (default) | always, hidden, from a shortcut in your Startup folder | Most reliable: works however Burp is started, including double-clicking a `.burp` file. |
+| `with-burp` | only while Burp is open, via a **"Burp Suite (Burpzip)"** shortcut on your Desktop and in the Start menu | The shortcut starts the provider, launches Burp, waits until every Burp window has closed, lets the close prompt ask its question, then stops the provider. If Burp is started any other way, zipped projects will not open (Burp shows an error; nothing is harmed). |
+| `manual` | only when you start it (GUI or `native serve`) | For testing. |
+
+## Settings (`burpzip.ini`)
+
+All settings live in one plain-text file, `burpzip.ini`, next to `burpzip.py`. The GUI's **Settings** dialog and menus read and write it; you can also edit it by hand. Paths under your profile are written as `%USERPROFILE%\...`, and invalid values fall back to the defaults.
+
+```ini
+[burp_folder]
+folder = %USERPROFILE%\Downloads\BurpProjects
+store = %USERPROFILE%\Downloads\BurpProjects-store
+provider = logon          ; logon | with-burp | manual
+ask_on_close = yes        ; ask to re-zip when Burp closes a changed project
+idle_days = 10            ; re-zip projects neither saved nor unpacked for N days (0 = never)
+
+[archive]
+days = 10                 ; "Archive all old" picks projects not edited for N days
+min_size_mb = 100
+level = 5                 ; 7-Zip level 0-9
+burp_path =               ; Burp Suite program; empty = find automatically
+extra_folders =           ; more folders to scan, one per line (indented)
+```
+
+On the first start of this version, settings from the older `%APPDATA%\burpzip\gui_settings.json` and an existing Burp folder are carried over automatically. A new user without either gets the first-run setup. `burpzip.ini` is personal and is not part of the repository.
 
 ### Limits
 
@@ -185,7 +218,8 @@ then launch Burp                          Open from Burp itself: Windows asks Bu
 
 | Module | Role |
 |---|---|
-| `burpzip.py` | CLI entry point, scanner and space planner, metadata-only protection of Burp-folder/cloud/store paths, provider control (start, stop, pause, autostart shortcut). |
+| `burpzip.py` | CLI entry point, scanner and space planner, metadata-only protection of Burp-folder/cloud/store paths, provider control (start, stop, pause, provider modes, Startup and "Burp Suite (Burpzip)" shortcuts, the `burp` launcher). |
+| `config.py` | Reads and writes `burpzip.ini`. |
 | `gui.py` | Tk GUI. One background worker thread does all file work; the Tk thread only shows results and dialogs. |
 | `archiver.py` | 7-Zip archive / verify / restore of `.burpz` files. Refuses protected paths. |
 | `launcher.py` | Finds and launches Burp; the ordinary open-then-re-zip flow; optional `.burpz` double-click association. |
@@ -248,7 +282,8 @@ If anything fails before the switch, the new generation is abandoned and the pro
 
 ### Background provider
 
-- Started at logon by a shortcut in your Startup folder: `pythonw burpzip.py native serve --store <store>`. No window, no service, no administrator rights.
+- Started by a shortcut, depending on the provider mode: at logon from your Startup folder (`pythonw burpzip.py native serve --store <store>`), or together with Burp by the "Burp Suite (Burpzip)" shortcut (`pythonw burpzip.py burp`). No window, no service, no administrator rights.
+- A stop request (including the one sent after Burp exits in `with-burp` mode) waits while a "Re-zip it now?" question is still open, so a question is never lost.
 - Holds the store lease while running. Commands that change the store (`add`, *Add to Burp folder*, *Unpack now*, *Re-zip*, *Archive all old*) pause it, do their work, and start it again.
 - Stops when asked through a `serve.stop` request file (`native stop`, or the GUI). Stopping disconnects only; the folder stays registered.
 - Every 10 seconds (ask-on-close) it checks unpacked projects: when one that Burp changed is released, it asks on a separate thread so serving continues while the dialog waits. Every hour it re-zips projects neither saved nor unpacked for 10 days.
@@ -307,6 +342,8 @@ python -m unittest -v test_burpzip test_cli
 ```
 
 The suite uses temporary synthetic projects. Cross-module lifecycle tests exercise real 7-Zip archive/restore/re-compression with temporary Windows file-lock holders; Burp launches and confirmation dialogs are mocked. GUI tests use withdrawn Tk windows rather than a visible application. Association tests redirect registry writes to the isolated scratch key `HKCU\Software\BurpZipTest`, clean it up, and do not change production file associations.
+
+Every test module imports `testenv.py`, which points `BURPZIP_CONFIG` at a throwaway path, so tests never read or change your real `burpzip.ini` (`test_config` covers the settings file itself).
 
 Native-mode tests (`test_native_cfapi`, `test_native_store`, `test_native_provider`, `test_native_cli`) use injected recording DLLs or a simulated Cloud Files adapter that follows the live Windows protocol, with real 7-Zip on temporary synthetic files; they never register a sync root. `test_native_live` registers throwaway sync roots under `%TEMP%\burpzip-native-test-*` and runs only when `BURPZIP_NATIVE_LIVE=1` is set; it never unregisters, so remove those test roots afterwards.
 

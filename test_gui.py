@@ -11,6 +11,8 @@ import threading
 import time
 import types
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 from pathlib import Path
 from unittest import mock
 
@@ -776,6 +778,33 @@ class BurpFolderGuiTests(unittest.TestCase):
             self.app.archive_all_old()
         add.assert_not_called()
         self.assertFalse(self.app.busy)
+
+    def test_provider_mode_menu_and_switch(self):
+        bar = self.app.menubar
+        index = [i for i in range(bar.index("end") + 1)
+                 if bar.type(i) == "cascade" and bar.entrycget(i, "label") == "Burp folder"][0]
+        folder_menu = bar.nametowidget(bar.entrycget(index, "menu"))
+        labels = [folder_menu.entrycget(i, "label") for i in range(folder_menu.index("end") + 1)
+                  if folder_menu.type(i) == "cascade"]
+        self.assertIn("Provider mode", labels)
+        self.app.mode_var.set("with-burp")
+        with mock.patch.object(self.app, "native_store", return_value=self.store), \
+                mock.patch.object(gui.burpzip, "apply_provider_mode",
+                                  return_value={"burp_shortcuts": ["D:/x.lnk"]}) as apply:
+            self.app.set_provider_mode()
+            self.wait_idle()
+            pump_until(self, self.root, lambda: self.app.settings["provider"] == "with-burp")
+        apply.assert_called_once_with(self.store, "with-burp")
+
+    def test_settings_round_trip_through_burpzip_ini(self):
+        path = Path(self.tmp.name) / "burpzip.ini"
+        settings = gui.load_settings(path)
+        settings.update(native_store=r"S:\store", provider="manual", ask_on_close=False, idle_days=3,
+                        days=20, extra_folders=[r"E:\Work"])
+        gui.save_settings(path, settings)
+        again = gui.load_settings(path)
+        for key in ("native_store", "provider", "ask_on_close", "idle_days", "days", "extra_folders"):
+            self.assertEqual(again[key], settings[key], key)
 
     def test_setup_refuses_when_already_configured(self):
         with mock.patch.object(self.app, "native_store", return_value=self.store),                 mock.patch.object(self.app, "_info") as info:

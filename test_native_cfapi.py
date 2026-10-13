@@ -10,6 +10,8 @@ import os
 import re
 import tempfile
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 import uuid
 from pathlib import Path
 from unittest import mock

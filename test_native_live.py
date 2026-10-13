@@ -15,6 +15,8 @@ import sys
 import tempfile
 import time
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 import uuid
 
 import archiver as ar

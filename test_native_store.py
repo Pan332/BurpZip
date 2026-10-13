@@ -6,6 +6,8 @@ import json
 import os
 import tempfile
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 from collections import namedtuple
 from unittest import mock
 

@@ -8,6 +8,8 @@ import tempfile
 import threading
 import time
 import unittest
+
+import testenv  # noqa: F401  (isolated burpzip.ini)
 from collections import namedtuple
 from pathlib import Path
 from types import SimpleNamespace

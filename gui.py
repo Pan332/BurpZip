@@ -38,6 +38,11 @@ POLL_MS = 100
 LEVELS = {"Normal (5)": 5, "Ultra (9)": 9}
 DEFAULT_SETTINGS: dict[str, Any] = {
     "native_store": "",
+    "folder": "",
+    "provider": "logon",
+    "ask_on_close": True,
+    "idle_days": 10,
+    "burp_path": "",
     "days": 10,
     "min_size_mb": burpzip.MIN_ARCHIVE_SIZE // MB,
     "level": 5,
@@ -394,15 +399,25 @@ def accepts_option(fn: Callable, canon: str) -> bool:
 
 # --- settings ----------------------------------------------------------------
 def default_settings_path() -> Path:
-    """%APPDATA%\\burpzip\\gui_settings.json."""
-    base = os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / "burpzip" / "gui_settings.json"
+    """burpzip.ini next to burpzip.py (see config.py)."""
+    import config
+    return config.config_path()
 
 
 def load_settings(path: Path | None) -> dict[str, Any]:
-    """Defaults overlaid with the saved settings file (if any)."""
+    """Defaults overlaid with the saved settings file (if any).
+
+    *.ini is burpzip.ini (config.py); a legacy JSON file is still read.
+    """
     s = dict(DEFAULT_SETTINGS)
     s["extra_folders"] = []
+    if path and path.suffix.lower() == ".ini":
+        import config
+        c = config.load(path)
+        s.update({k: c[k] for k in ("folder", "provider", "ask_on_close", "idle_days", "burp_path",
+                                    "days", "min_size_mb", "level", "extra_folders")})
+        s["native_store"] = c["store"]
+        return s
     if path and path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -415,6 +430,17 @@ def load_settings(path: Path | None) -> dict[str, Any]:
 def save_settings(path: Path | None, settings: dict[str, Any]) -> None:
     """Persist settings; silently ignored when *path* is None or unwritable."""
     if not path:
+        return
+    if path.suffix.lower() == ".ini":
+        import config
+        c = config.load(path)
+        c.update({k: settings[k] for k in ("folder", "provider", "ask_on_close", "idle_days", "burp_path",
+                                           "days", "min_size_mb", "level", "extra_folders") if k in settings})
+        c["store"] = settings.get("native_store", "") or ""
+        try:
+            config.save(c, path)
+        except OSError:
+            pass
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -500,9 +526,14 @@ class BurpZipApp:
         n.add_separator()
         n.add_command(label="Start provider", command=self.start_provider)
         n.add_command(label="Stop provider", command=self.stop_provider)
-        self.autostart_var = tk.BooleanVar(value=burpzip.autostart_enabled())
-        n.add_checkbutton(label="Start provider automatically at logon",
-                          variable=self.autostart_var, command=self.toggle_autostart)
+        modes = tk.Menu(n, tearoff=False)
+        self.mode_var = tk.StringVar(value=self.settings.get("provider", "logon"))
+        for value, label in (("logon", "Start at Windows logon"),
+                             ("with-burp", "Start with Burp (\"Burp Suite (Burpzip)\" shortcut)"),
+                             ("manual", "Manual (start it yourself)")):
+            modes.add_radiobutton(label=label, value=value, variable=self.mode_var,
+                                  command=self.set_provider_mode)
+        n.add_cascade(label="Provider mode", menu=modes)
         n.add_command(label="Show provider log", command=self.show_provider_log)
         bar.add_cascade(label="Burp folder", menu=n)
         self.root.config(menu=bar)
@@ -841,8 +872,13 @@ class BurpZipApp:
             self.settings["native_store"] = payload[0]
             save_settings(self.settings_path, self.settings)
             self.update_provider_status()
-        elif kind == "autostart":
-            self.autostart_var.set(payload[0])
+        elif kind == "mode":
+            self.settings["provider"] = payload[0]
+            self.mode_var.set(payload[0])
+            save_settings(self.settings_path, self.settings)
+        elif kind == "folder":
+            self.settings["folder"] = payload[0]
+            save_settings(self.settings_path, self.settings)
 
     def set_busy(self, busy: bool, name: str = "") -> None:
         """Toggle conflicting buttons, Stop and the progress bar."""
@@ -1164,10 +1200,9 @@ class BurpZipApp:
                 return
             root = Path(chosen)
         store = root.with_name(root.name + "-store")
-        autostart = messagebox.askyesno(
-            "Set up Burp folder", "Start the provider automatically when you log in to Windows?\n\n"
-            "Without it, start the provider yourself before opening archived projects in Burp.",
-            parent=self.root)
+        mode = self.ask_provider_mode()
+        if mode is None:
+            return
 
         def job() -> None:
             import native_store
@@ -1177,10 +1212,10 @@ class BurpZipApp:
                     raise RuntimeError(f"{folder} is not empty; choose a new empty folder")
             native_store.init_root(str(root), str(store))
             self.post("native_store", str(store))
-            if autostart:
-                burpzip.set_autostart(store, True)
-                self.post("autostart", True)
-            burpzip.start_provider(store)
+            self.post("folder", str(root))
+            burpzip.apply_provider_mode(store, mode)
+            self.post("mode", mode)
+            burpzip.start_provider(store)  # Serve now in every mode.
             self.post("provider")
             self.post("log", f"Burp folder ready: {root} (store {store}). "
                              "Use 'Add to Burp folder' to put projects in it.")
@@ -1235,22 +1270,64 @@ class BurpZipApp:
             self.post("provider")
         self.submit("Stop provider", job)
 
-    def toggle_autostart(self) -> None:
-        wanted = bool(self.autostart_var.get())
+    def ask_provider_mode(self) -> str | None:
+        """Small modal choice of when the background provider runs."""
+        d = self._dialog("Provider mode")
+        frm = ttk.Frame(d, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="When should the background provider run?\n"
+                            "(Burp can only open still-zipped projects while it runs.)").pack(anchor="w")
+        choice = tk.StringVar(value=self.settings.get("provider", "logon"))
+        for value, label in (("logon", "At Windows logon (recommended, always works)"),
+                             ("with-burp", "Only with Burp: use the \"Burp Suite (Burpzip)\" shortcut"),
+                             ("manual", "Manual: I start it myself")):
+            ttk.Radiobutton(frm, text=label, value=value, variable=choice).pack(anchor="w", pady=1)
+        result: list[str | None] = [None]
+
+        def ok() -> None:
+            result[0] = choice.get()
+            d.destroy()
+        row = ttk.Frame(d, padding=8)
+        row.pack(fill="x")
+        ttk.Button(row, text="Cancel", command=d.destroy).pack(side="right")
+        ttk.Button(row, text="OK", command=ok).pack(side="right", padx=6)
+        d.grab_set()
+        self.root.wait_window(d)
+        return result[0]
+
+    def set_provider_mode(self) -> None:
+        mode = self.mode_var.get()
         store = self._require_store()
         if store is None:
-            self.autostart_var.set(burpzip.autostart_enabled())
+            self.mode_var.set(self.settings.get("provider", "logon"))
             return
 
         def job() -> None:
             try:
-                burpzip.set_autostart(store, wanted)
-                self.post("log", "Provider will start at logon." if wanted
-                          else "Provider will no longer start at logon.")
-            finally:
-                self.post("autostart", burpzip.autostart_enabled())
-        if not self.submit("Autostart", job):
-            self.autostart_var.set(burpzip.autostart_enabled())
+                result = burpzip.apply_provider_mode(store, mode)
+                where = {"logon": "The provider now starts when you log in to Windows.",
+                         "with-burp": "Use the \"Burp Suite (Burpzip)\" shortcut (Desktop / Start menu) "
+                                      "to open Burp; it starts and stops the provider.",
+                         "manual": "Start the provider yourself (Burp folder > Start provider)."}[mode]
+                self.post("log", f"Provider mode: {mode}. {where}")
+                self.post("mode", mode)
+                if result.get("burp_shortcuts"):
+                    self.post("log", "Shortcuts: " + "; ".join(result["burp_shortcuts"]))
+            except Exception:
+                self.post("mode", self.settings.get("provider", "logon"))
+                raise
+        if not self.submit("Provider mode", job):
+            self.mode_var.set(self.settings.get("provider", "logon"))
+
+    def first_run(self) -> None:
+        """No burpzip.ini and no Burp folder yet: offer the Burp folder once."""
+        if messagebox.askyesno(
+                "Welcome to Burpzip",
+                "Set up a Burp folder now?\n\nProjects in it stay zipped and open directly from "
+                "Burp's 'Open existing project'. You can also do this later from the Burp folder menu.",
+                parent=self.root):
+            self.setup_burp_folder()
+        save_settings(self.settings_path, self.settings)  # Ask only once.
 
     def add_to_burp_folder(self) -> None:
         store = self._require_store()
@@ -1466,6 +1543,25 @@ class BurpZipApp:
         lb.grid(row=4, column=0, columnspan=2, sticky="we")
         btns = ttk.Frame(frm)
         btns.grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Label(frm, text="Burp folder:").grid(row=6, column=0, sticky="w", pady=(10, 0))
+        ask_var = tk.BooleanVar(value=bool(self.settings.get("ask_on_close", True)))
+        ttk.Checkbutton(frm, text="Ask to re-zip when Burp closes a changed project",
+                        variable=ask_var).grid(row=7, column=0, columnspan=2, sticky="w")
+        ttk.Label(frm, text="Re-zip projects untouched for (days, 0 = never):").grid(
+            row=8, column=0, sticky="w")
+        idle = tk.StringVar(value=str(self.settings.get("idle_days", 10)))
+        ttk.Spinbox(frm, from_=0, to=3650, textvariable=idle, width=8).grid(row=8, column=1, sticky="w")
+        ttk.Label(frm, text="Burp Suite program (empty = find automatically):").grid(
+            row=9, column=0, sticky="w", pady=(6, 0))
+        burp_path = tk.StringVar(value=self.settings.get("burp_path", ""))
+        ttk.Entry(frm, textvariable=burp_path, width=56).grid(row=10, column=0, sticky="we")
+
+        def browse_burp() -> None:
+            p = filedialog.askopenfilename(parent=d, title="Burp Suite program",
+                                           filetypes=[("Programs", "*.exe"), ("All files", "*.*")])
+            if p:
+                burp_path.set(os.path.normpath(p))
+        ttk.Button(frm, text="Browse...", command=browse_burp).grid(row=10, column=1, sticky="w")
 
         def add() -> None:
             p = filedialog.askdirectory(parent=d)
@@ -1481,17 +1577,28 @@ class BurpZipApp:
         def save() -> None:
             try:
                 new = {"days": max(1, int(days.get())), "min_size_mb": max(0, int(mins.get())),
-                       "level": LEVELS[level.get()], "extra_folders": list(lb.get(0, "end"))}
+                       "level": LEVELS[level.get()], "extra_folders": list(lb.get(0, "end")),
+                       "ask_on_close": bool(ask_var.get()), "idle_days": max(0, int(idle.get())),
+                       "burp_path": burp_path.get().strip()}
             except (ValueError, KeyError):
                 messagebox.showerror("burpzip", "Days and size must be whole numbers.",
                                      parent=d)
                 return
+            provider_changed = any(new[k] != self.settings.get(k) for k in ("ask_on_close", "idle_days"))
             folders_changed = new["extra_folders"] != self.settings.get("extra_folders", [])
             self.settings.update(new)
             save_settings(self.settings_path, self.settings)
             d.destroy()
             self.refresh()
-            if folders_changed and not self.busy:
+            store = self.native_store()
+            if provider_changed and store is not None and burpzip.provider_running(store):
+                def restart() -> None:  # serve reads ask_on_close / idle_days at start
+                    burpzip.stop_provider(store)
+                    burpzip.start_provider(store)
+                    self.post("log", "Provider restarted with the new settings.")
+                    self.post("provider")
+                self.submit("Restart provider", restart)
+            elif folders_changed and not self.busy:
                 self.rescan()
         row = ttk.Frame(d, padding=8)
         row.pack(fill="x")
@@ -1552,7 +1659,11 @@ def main(roots: list[Path] | None = None, days: int | None = None) -> None:
         ttk.Style(root).theme_use("vista")
     except tk.TclError:
         pass
-    BurpZipApp(root, roots=roots, days=days, settings_path=default_settings_path())
+    burpzip.ensure_config()  # First run of this version: carry existing settings over.
+    import config
+    app = BurpZipApp(root, roots=roots, days=days, settings_path=default_settings_path())
+    if not config.exists() and app.native_store() is None:
+        root.after(600, app.first_run)
     root.mainloop()
 
 

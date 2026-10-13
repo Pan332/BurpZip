@@ -518,7 +518,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd")
 
     def scan_options(parser):
-        parser.add_argument("--days", type=_nonnegative, default=10,
+        parser.add_argument("--days", type=_nonnegative, default=_config()["days"],
                             help="projects not edited for this many days or more")
         parser.add_argument("--min-mb", type=_nonnegative, default=MIN_ARCHIVE_SIZE // 1024**2,
                             help="skip projects smaller than this many MiB")
@@ -566,6 +566,9 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("register", help="explicitly register this user's .burpz association")
     sub.add_parser("unregister", help="explicitly remove burpzip's per-user association")
     sub.add_parser("gui", help="open the desktop GUI (also the no-arguments default)")
+    burp = sub.add_parser("burp", help="start the Burp-folder provider if needed, launch Burp, and "
+                                       "stop the provider after Burp exits (provider = with-burp)")
+    burp.add_argument("--project", help="optional .burp project to open")
     native = sub.add_parser("native", help="experimental native-open commands (activation release-gated)")
     commands = native.add_subparsers(dest="native_cmd", required=True)
     init = commands.add_parser("init", help="register a NEW empty root; explicit experimental consent")
@@ -585,6 +588,9 @@ def _parser() -> argparse.ArgumentParser:
     pick.add_argument("--name", help="one Burp-folder project, e.g. Example.burp")
     pick.add_argument("--idle-days", type=_nonnegative, help="all unpacked projects unchanged this long")
     rezip.add_argument("--level", type=int, choices=range(10), default=5, metavar="0-9")
+    mode = commands.add_parser("provider-mode", help="when the provider runs: logon | with-burp | manual")
+    mode.add_argument("mode", choices=("logon", "with-burp", "manual"))
+    mode.add_argument("--store", type=Path, help="default: the store in burpzip.ini")
     stop = commands.add_parser("stop", help="ask a running (also hidden) provider to disconnect")
     stop.add_argument("--store", type=Path, required=True)
     auto = commands.add_parser("autostart", help="start the provider hidden at Windows logon")
@@ -605,10 +611,14 @@ def _parser() -> argparse.ArgumentParser:
             parser.add_argument("--deadline-seconds", type=_deadline, default=600,
                                 help="whole-job deadline 1..86400 seconds (default: 600)")
         if command == "serve":
-            parser.add_argument("--idle-days", type=_nonnegative, default=10,
-                                help="re-zip unpacked projects unchanged this many days (0 = off; default 10)")
-            parser.add_argument("--no-ask-on-close", dest="ask_on_close", action="store_false",
-                                help="do not ask to re-zip when Burp closes a changed project")
+            parser.add_argument("--idle-days", type=_nonnegative, default=None,
+                                help="re-zip unpacked projects untouched this many days "
+                                     "(0 = off; default: idle_days in burpzip.ini, else 10)")
+            ask = parser.add_mutually_exclusive_group()
+            ask.add_argument("--ask-on-close", dest="ask_on_close", action="store_const", const=True,
+                             default=None, help="ask to re-zip when Burp closes a changed project")
+            ask.add_argument("--no-ask-on-close", dest="ask_on_close", action="store_const", const=False,
+                             help="do not ask (default: ask_on_close in burpzip.ini, else yes)")
         if command == "export":
             parser.add_argument("--name", required=True, help="managed project filename")
             parser.add_argument("--dest", type=Path, required=True, help="NEW ordinary project file")
@@ -705,10 +715,18 @@ _NO_WINDOW = 0x08000000      # CREATE_NO_WINDOW
 _DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
 
 
+def _config() -> dict:
+    import config
+    try:
+        return config.load()
+    except Exception:
+        return config.defaults()
+
+
 def native_store_path(configured: str | os.PathLike | None = None) -> Path | None:
-    """The configured native store, else the default one if it exists."""
+    """The given store, else the one in burpzip.ini, else the default one, if it exists."""
     import native_store
-    for candidate in (configured, DEFAULT_NATIVE_STORE):
+    for candidate in (configured, _config().get("store") or None, DEFAULT_NATIVE_STORE):
         if candidate and (Path(candidate) / native_store.MARKER).is_file():
             return Path(os.path.abspath(candidate))
     return None
@@ -824,20 +842,156 @@ def set_autostart(store: str | os.PathLike, enable: bool) -> Path:
     NativeStore(store).status()  # Must be an existing valid store.
     import launcher
     script = os.path.abspath(__file__)
-    # Values travel via environment variables, never interpolated into the script.
+    _write_shortcut(shortcut, launcher.resolve_pythonw(), [script, "native", "serve", "--store", store],
+                    "Burpzip native-open provider")
+    return shortcut
+
+
+def _write_shortcut(link: Path, target: str, arguments: list[str], description: str,
+                    icon: str | None = None) -> None:
+    """Create a .lnk via WScript.Shell; values travel in environment variables only."""
     ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:BZ_LNK);"
           "$s.TargetPath=$env:BZ_EXE;$s.Arguments=$env:BZ_ARGS;"
-          "$s.WorkingDirectory=$env:BZ_DIR;$s.WindowStyle=7;"
-          "$s.Description='Burpzip native-open provider';$s.Save()")
-    env = {**os.environ, "BZ_LNK": str(shortcut), "BZ_EXE": launcher.resolve_pythonw(),
-           "BZ_ARGS": subprocess.list2cmdline([script, "native", "serve", "--store", store]),
-           "BZ_DIR": os.path.dirname(script)}
-    shortcut.parent.mkdir(parents=True, exist_ok=True)
+          "$s.WorkingDirectory=$env:BZ_DIR;$s.WindowStyle=7;$s.Description=$env:BZ_DESC;"
+          "if ($env:BZ_ICON) { $s.IconLocation=$env:BZ_ICON };$s.Save()")
+    env = {**os.environ, "BZ_LNK": str(link), "BZ_EXE": target,
+           "BZ_ARGS": subprocess.list2cmdline(arguments), "BZ_DESC": description,
+           "BZ_DIR": os.path.dirname(os.path.abspath(__file__)), "BZ_ICON": icon or ""}
+    link.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], env=env,
                    check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL, timeout=60,
                    creationflags=_NO_WINDOW if os.name == "nt" else 0)
-    return shortcut
+
+
+BURP_SHORTCUT = "Burp Suite (Burpzip).lnk"
+
+
+def _desktop_dir() -> Path:
+    """The real Desktop folder (it may be redirected, e.g. to OneDrive)."""
+    if os.name == "nt":
+        buffer = ctypes.create_unicode_buffer(32768)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buffer) == 0:  # CSIDL_DESKTOPDIRECTORY
+            return Path(buffer.value)
+    return Path.home() / "Desktop"
+
+
+def burp_shortcut_paths() -> list[Path]:
+    """Desktop and Start-menu "Burp Suite (Burpzip)" shortcuts."""
+    paths = [_desktop_dir() / BURP_SHORTCUT]
+    try:
+        paths.append(_startup_shortcut().parent.parent / BURP_SHORTCUT)  # ...\Start Menu\Programs
+    except CliUsageError:
+        pass
+    return paths
+
+
+def burp_shortcuts_enabled() -> bool:
+    return any(p.is_file() for p in burp_shortcut_paths())
+
+
+def set_burp_shortcuts(enable: bool) -> list[Path]:
+    """Add/remove shortcuts that run `burpzip.py burp` (provider + Burp together)."""
+    links = burp_shortcut_paths()
+    if not enable:
+        for link in links:
+            if link.is_file():
+                link.unlink()
+        return links
+    import launcher
+    script = os.path.abspath(__file__)
+    for link in links:
+        _write_shortcut(link, launcher.resolve_pythonw(), [script, "burp"],
+                        "Burp Suite with the Burpzip Burp-folder provider",
+                        icon=launcher.burp_exe_for_icon())
+    return links
+
+
+def apply_provider_mode(store: str | os.PathLike, mode: str, *, save: bool = False) -> dict:
+    """logon: Startup shortcut; with-burp: Burp shortcuts; manual: neither."""
+    import config
+    if mode not in config.PROVIDER_MODES:
+        raise CliUsageError(f"provider mode must be one of {', '.join(config.PROVIDER_MODES)}")
+    set_autostart(store, mode == "logon")
+    links = set_burp_shortcuts(mode == "with-burp")
+    started = start_provider(store) if mode == "logon" else False
+    if save:
+        settings = _config()
+        settings.update(provider=mode, store=str(os.path.abspath(store)))
+        config.save(settings)
+    return {"provider": mode, "autostart_at_logon": mode == "logon",
+            "burp_shortcuts": [str(p) for p in links] if mode == "with-burp" else [],
+            "started_now": started}
+
+
+def run_with_burp(project: str | None = None, *, poll: float = 3.0, settle: float = 25.0,
+                  appear: float = 120.0) -> dict:
+    """What the "Burp Suite (Burpzip)" shortcut runs.
+
+    Starts the provider if needed, launches Burp, waits until every Burp process
+    has exited (Burp's launcher exits early, so processes are watched, not the
+    launcher), then - in with-burp mode, and only if this run started it - asks
+    the provider to stop. The provider defers the stop while a "Re-zip it now?"
+    question is still open.
+    """
+    import launcher
+    ensure_config()
+    settings = _config()
+    store = native_store_path()
+    started = bool(store) and start_provider(store)
+    command = launcher.find_burp() + ([f"--project-file={os.path.abspath(project)}"] if project else [])
+    subprocess.Popen(command, cwd=os.path.dirname(command[0]) or None, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                     creationflags=_DETACHED if os.name == "nt" else 0)
+    deadline = time.monotonic() + appear
+    while not burp_running() and time.monotonic() < deadline:
+        time.sleep(poll)
+    while burp_running():
+        time.sleep(poll)
+    stop_requested = False
+    if started and settings["provider"] == "with-burp":
+        time.sleep(settle)  # Let the close watcher notice the release and ask.
+        import native_provider
+        native_provider.request_stop(str(store))
+        stop_requested = True
+    return {"burp": "exited", "provider_started": started, "provider_stop_requested": stop_requested}
+
+
+def ensure_config() -> dict | None:
+    """First run of this version: write burpzip.ini from the old GUI settings and an
+    existing Burp folder, so nothing changes for existing users.
+
+    Skipped when burpzip.ini exists or BURPZIP_CONFIG points elsewhere (tests).
+    Returns the settings written, or None.
+    """
+    import config
+    if config.exists() or os.environ.get("BURPZIP_CONFIG"):
+        return None
+    settings, found = config.defaults(), False
+    legacy = Path(os.environ.get("APPDATA") or Path.home()) / "burpzip" / "gui_settings.json"
+    try:
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+        found = True
+        for key in ("days", "min_size_mb", "level", "extra_folders"):
+            if key in data:
+                settings[key] = data[key]
+        settings["store"] = data.get("native_store") or ""
+    except (OSError, ValueError, AttributeError):
+        pass
+    store = native_store_path(settings["store"] or None)
+    if store is not None:
+        found = True
+        settings["store"] = str(store)
+        try:
+            from native_store import NativeStore
+            settings["folder"] = NativeStore(str(store)).root
+        except Exception:
+            pass
+        settings["provider"] = "logon" if autostart_enabled() else "manual"
+    if not found:
+        return None
+    config.save(settings)
+    return settings
 
 
 def _autostart(store: Path, *, enable: bool) -> dict:
@@ -896,13 +1050,20 @@ def _native_dispatch(args) -> int:
                   "registration_retained": True}
     elif command == "autostart":
         result = _autostart(args.store, enable=args.enable)
+    elif command == "provider-mode":
+        store = native_store_path(args.store)
+        if store is None:
+            raise CliUsageError("no Burp folder store found; run 'native init' or set store in burpzip.ini")
+        result = apply_provider_mode(store, args.mode, save=True)
     else:
         import native_provider
         deadline = args.deadline_seconds
         if command == "serve":
+            settings = _config()
+            idle = args.idle_days if args.idle_days is not None else settings["idle_days"]
+            ask = args.ask_on_close if args.ask_on_close is not None else settings["ask_on_close"]
             result = native_provider.serve_root(str(args.store), deadline_seconds=deadline,
-                                                idle_days=int(args.idle_days),
-                                                ask_on_close=args.ask_on_close)
+                                                idle_days=int(idle), ask_on_close=bool(ask))
         elif command == "materialize":
             with paused_provider(args.store):
                 result = native_provider.materialize_root(str(args.store), deadline_seconds=deadline)
@@ -934,6 +1095,10 @@ def _native_dispatch(args) -> int:
 def _dispatch(args) -> int:
     if args.cmd == "native":
         return _native_dispatch(args)
+    if args.cmd == "burp":
+        result = run_with_burp(args.project)
+        _say(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
     if args.cmd in (None, "gui"):
         import gui
         gui.main([])

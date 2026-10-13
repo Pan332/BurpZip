@@ -174,6 +174,15 @@ def find_burp() -> list[str]:
     falls back to ``jre\\bin\\javaw.exe -jar burpsuite.jar``. Raises
     LauncherError when nothing is found.
     """
+    try:
+        import config
+        custom = config.load().get("burp_path") or ""
+    except Exception:
+        custom = ""
+    if custom:
+        if os.path.isfile(custom):
+            return [custom]
+        raise LauncherError(f"burp_path in burpzip.ini does not exist: {custom}")
     dirs = [d for d in _candidate_dirs() if os.path.isdir(d)]
     for d in dirs:
         for exe in EXE_NAMES:
