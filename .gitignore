@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local runs: plans and any Burp project data must never be committed
+plan.json
+*.burp
+*.burp.backup*
+*.burpz
+*.partial
+*.partial.tmp
+
+# Burp folder store files (if a store is ever created inside the repo)
+.burpzip-native-store.json
+.burpzip-native.lock
+native-journal.jsonl
+serve.log
+serve.stop
